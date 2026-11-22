@@ -32,3 +32,6 @@ sysinfo.txt
 
 # 构建日志
 *.log
+
+# Release 打包产物（挂在 GitHub Release 页，不进仓库）
+*.zip
