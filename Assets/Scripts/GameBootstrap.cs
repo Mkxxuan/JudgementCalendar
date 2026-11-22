@@ -37,10 +37,13 @@ namespace JudgementCalendar
         void LateUpdate()
         {
             if (canvas == null) canvas = GetComponent<Canvas>();
-            int k = Mathf.Max(1, Mathf.Min(
-                Mathf.FloorToInt((float)Screen.width / 1280f),
-                Mathf.FloorToInt((float)Screen.height / 720f)));
-            if (canvas.scaleFactor != k) canvas.scaleFactor = k;
+            // 画布本地单位恒定 1280×720（设计分辨率）：scaleFactor 取 屏幕/设计 的精确比
+            // 这样全部 UI 的绝对像素值（面板高度、格子尺寸、字号）都按 1280×720 语义生效，
+            // 任何分辨率下布局一致，不再出现"格子填不满面板"的错位
+            float k = Mathf.Max(1f, Mathf.Min(
+                (float)Screen.width / 1280f,
+                (float)Screen.height / 720f));
+            if (!Mathf.Approximately(canvas.scaleFactor, k)) canvas.scaleFactor = k;
         }
     }
 
@@ -119,13 +122,15 @@ namespace JudgementCalendar
         ScrollRect convScroll;
         ScrollRect arcScroll;
         Text arcText;
-        Text[] statNums = new Text[3];        // 三维数值大数字（富文本：大数字 + 小 /100）
-        RectTransform[] statFills = new RectTransform[3]; // 仪表条填充
+        Text[] statNums = new Text[5];        // 状态仪表大数字（富文本：大数字 + 小 /上限）
+        RectTransform[] statFills = new RectTransform[5]; // 仪表条填充
         Text auxStats;                        // 实锤/行动点等次级数值
-        static Sprite iconShield, iconKey, iconEye;
+        static Sprite iconShield, iconKey, iconEye, iconBolt, iconGlass;
         Text headerText;
-        RectTransform hintPopup;   // 提示悬浮窗（右侧，有内容才弹出）
+        RectTransform hintPopup;   // 提示悬浮窗（右侧，有新提示才弹出，2 秒后自动消失）
         Text hintBody;
+        float hintShownAt;         // 当前提示开始展示的时间
+        string activeHint;         // 已展示过的提示内容（防止同一提示反复弹出）
         ScrollRect hintScroll;
         RectTransform qContainer;
         RectTransform optContainer;
@@ -201,6 +206,26 @@ namespace JudgementCalendar
                 "..####..",
                 "........",
             });
+            iconBolt = MakeIconSprite(new[] { // 行动点：闪电
+                "...##...",
+                "..##....",
+                ".######.",
+                "...##...",
+                "..##....",
+                ".##.....",
+                "##......",
+                "........",
+            });
+            iconGlass = MakeIconSprite(new[] { // 实锤：放大镜
+                ".####...",
+                "#....#..",
+                "#....#..",
+                "#....#..",
+                ".####...",
+                "....#...",
+                ".....##.",
+                "......##",
+            });
             Sfx.Init();
             engine = new GameEngine();
             BuildUI();
@@ -210,6 +235,10 @@ namespace JudgementCalendar
 
         void Update()
         {
+            // 提示浮窗 2 秒后自动消失（不依赖游戏状态变化，优先处理）
+            if (hintPopup != null && hintPopup.gameObject.activeSelf && Time.time - hintShownAt >= 2f)
+                hintPopup.gameObject.SetActive(false);
+
             if (showTitle) return;
             if (tutorialPanel != null && tutorialPanel.gameObject.activeSelf) return;
             if (Input.GetKeyDown(KeyCode.Escape)) TogglePause();
@@ -315,48 +344,60 @@ namespace JudgementCalendar
             Stretch(midBody, 8, 8, 8, 32);
             convScroll = MakeScroll(midBody, out convText);
 
-            // 右：状态（图标 + 大数字/100 + 三色横条仪表，参照概念图「决策官状态」窗口）
+            // 右：状态（图标 + 名称 + 大数字 + 横条仪表；行动点/实锤与三维数值同款样式，标签字号加大）
             var right = MakePanel(root, "Right", Pal.Panel);
             Anchor(right, 0.73f, 0.35f, 0.99f, 0.92f);
-            var rt = AddText(right, "状态监控 ▸ 决策官", FS_S, Pal.TextDim, TextAnchor.MiddleLeft);
-            Stretch(rt.rectTransform, 16, 32, 16, 8);
+            var rt = AddText(right, "状态监控 ▸ 决策官", FS_M, Pal.TextDim, TextAnchor.MiddleLeft);
+            rt.rectTransform.anchorMin = new Vector2(0, 1);
+            rt.rectTransform.anchorMax = new Vector2(1, 1);
+            rt.rectTransform.pivot = new Vector2(0, 1);
+            rt.rectTransform.sizeDelta = new Vector2(0, 28);
+            rt.rectTransform.anchoredPosition = new Vector2(16, -4);
 
-            string[] names = { "稳定度", "信任度", "偏移值" };
-            Sprite[] icons = { iconShield, iconKey, iconEye };
-            Color[] iconCols = { Pal.Gold, Pal.Gold, Pal.Purple };
-            for (int i = 0; i < 3; i++)
+            auxStats = AddText(right, "", FS_M, Pal.TextDim, TextAnchor.MiddleLeft);
+            auxStats.rectTransform.anchorMin = new Vector2(0, 1);
+            auxStats.rectTransform.anchorMax = new Vector2(1, 1);
+            auxStats.rectTransform.pivot = new Vector2(0, 1);
+            auxStats.rectTransform.sizeDelta = new Vector2(0, 24);
+            auxStats.rectTransform.anchoredPosition = new Vector2(16, -34);
+
+            string[] names = { "稳定度", "信任度", "偏移值", "行动点", "实锤" };
+            Sprite[] icons = { iconShield, iconKey, iconEye, iconBolt, iconGlass };
+            Color[] iconCols = { Pal.Gold, Pal.Gold, Pal.Purple, Pal.Gold, Pal.Gold };
+            for (int i = 0; i < 5; i++)
             {
                 var row = NewRect("StatRow" + i, right);
                 row.anchorMin = new Vector2(0, 0);
                 row.anchorMax = new Vector2(1, 0);
-                row.sizeDelta = new Vector2(0, 72);
-                row.anchoredPosition = new Vector2(0, 44 + i * 80);
+                row.sizeDelta = new Vector2(0, 62);
+                row.anchoredPosition = new Vector2(0, 35 + i * 70); // pivot 居中：35 = 半行高，保证行底从面板底 4px 起
 
                 var iconRt = NewRect("Icon", row);
                 iconRt.anchorMin = new Vector2(0, 0.5f);
                 iconRt.anchorMax = new Vector2(0, 0.5f);
                 iconRt.pivot = new Vector2(0, 0.5f);
                 iconRt.sizeDelta = new Vector2(32, 32); // 8px 图标 × 4 整数倍
-                iconRt.anchoredPosition = new Vector2(16, 4);
+                iconRt.anchoredPosition = new Vector2(16, 0);
                 var iconImg = iconRt.gameObject.AddComponent<Image>();
                 iconImg.sprite = icons[i];
                 iconImg.preserveAspect = true;
                 iconImg.color = iconCols[i];
                 iconImg.raycastTarget = false;
 
-                var nameT = AddText(row, names[i], FS_S, Pal.TextDim, TextAnchor.UpperLeft);
+                // 名称（左，24px）与 大数字（右，36px）同行
+                var nameT = AddText(row, names[i], FS_M, Pal.TextDim, TextAnchor.MiddleLeft);
                 nameT.rectTransform.anchorMin = new Vector2(0, 1);
                 nameT.rectTransform.anchorMax = new Vector2(1, 1);
                 nameT.rectTransform.pivot = new Vector2(0, 1);
-                nameT.rectTransform.sizeDelta = new Vector2(0, 20);
-                nameT.rectTransform.anchoredPosition = new Vector2(56, 0);
+                nameT.rectTransform.sizeDelta = new Vector2(0, 36);
+                nameT.rectTransform.anchoredPosition = new Vector2(56, -2);
 
-                var numT = AddText(row, "", FS_M, Pal.Gold, TextAnchor.UpperLeft);
+                var numT = AddText(row, "", FS_M, Pal.Gold, TextAnchor.MiddleRight);
                 numT.rectTransform.anchorMin = new Vector2(0, 1);
                 numT.rectTransform.anchorMax = new Vector2(1, 1);
                 numT.rectTransform.pivot = new Vector2(0, 1);
-                numT.rectTransform.sizeDelta = new Vector2(0, 44);
-                numT.rectTransform.anchoredPosition = new Vector2(56, -20);
+                numT.rectTransform.sizeDelta = new Vector2(0, 36);
+                numT.rectTransform.anchoredPosition = new Vector2(-16, -2);
                 numT.supportRichText = true;
                 statNums[i] = numT;
 
@@ -364,8 +405,8 @@ namespace JudgementCalendar
                 barBg.anchorMin = new Vector2(0, 0);
                 barBg.anchorMax = new Vector2(1, 0);
                 barBg.pivot = new Vector2(0, 0);
-                barBg.offsetMin = new Vector2(56, 8);
-                barBg.offsetMax = new Vector2(-16, 16);
+                barBg.offsetMin = new Vector2(56, 6);
+                barBg.offsetMax = new Vector2(-16, 14);
                 var bgImg = barBg.gameObject.AddComponent<Image>();
                 bgImg.color = Pal.LineOff;
                 bgImg.raycastTarget = false;
@@ -381,40 +422,35 @@ namespace JudgementCalendar
                 statFills[i] = fill;
             }
 
-            auxStats = AddText(right, "", FS_S, Pal.TextDim, TextAnchor.UpperLeft);
-            auxStats.rectTransform.anchorMin = new Vector2(0, 0);
-            auxStats.rectTransform.anchorMax = new Vector2(1, 0);
-            auxStats.rectTransform.pivot = new Vector2(0, 0);
-            auxStats.rectTransform.offsetMin = new Vector2(16, 252);
-            auxStats.rectTransform.offsetMax = new Vector2(-16, 372);
-
             // 底部操作区：固定网格分区 —— 主体区 / 流程按钮行，互不重叠
             // （提示已移至右侧悬浮窗，顶部 24px 作为呼吸留白）
             var bottom = MakePanel(root, "Bottom", Pal.PanelLo);
             Anchor(bottom, 0.01f, 0.02f, 0.99f, 0.33f);
 
-            // 问题按钮区（上）：2 行 × 40px
+            // 问题按钮区（上）：2 行大按钮（36px 字），高度静态计算 = (159-8)/2
             qWrap = NewRect("QWrap", bottom);
-            Stretch(qWrap, 16, 56, 16, 24);
+            Stretch(qWrap, 16, 56, 16, 8);
             var qGrid = qWrap.gameObject.AddComponent<GridLayoutGroup>();
-            qGrid.cellSize = new Vector2(296, 40);
+            qGrid.cellSize = new Vector2(299, 75);
             qGrid.spacing = new Vector2(8, 8);
             qGrid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
             qGrid.constraintCount = 4;
             qContainer = qWrap;
 
-            // 决策选项区（与问题区互斥，独占主体到面板底）
+            // 决策选项区（与问题区互斥）：左中右横向三列，铺满同一高度区
             optWrap = NewRect("OptWrap", bottom);
-            Stretch(optWrap, 16, 8, 16, 24);
-            var ov = optWrap.gameObject.AddComponent<VerticalLayoutGroup>();
-            ov.spacing = 8;
-            ov.childForceExpandWidth = true;
-            ov.childForceExpandHeight = false;
+            Stretch(optWrap, 16, 56, 16, 8);
+            var ov = optWrap.gameObject.AddComponent<GridLayoutGroup>();
+            ov.padding = new RectOffset(0, 0, 0, 0);
+            ov.spacing = new Vector2(8, 8);
+            ov.cellSize = new Vector2(402, 158);
+            ov.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+            ov.constraintCount = 3;
             optContainer = optWrap;
 
-            // 流程按钮行（底）：固定 40px 一行
+            // 流程按钮行：固定贴在最底部（39px 条），与上方区域零重叠
             flowWrap = NewRect("FlowWrap", bottom);
-            Stretch(flowWrap, 16, 8, 16, 168);
+            Stretch(flowWrap, 16, 8, 16, 176);
             var fv = flowWrap.gameObject.AddComponent<VerticalLayoutGroup>();
             fv.childForceExpandWidth = true;
             fv.childForceExpandHeight = false;
@@ -519,15 +555,6 @@ namespace JudgementCalendar
             var tutGo = MakeButton(tutBox, "进 入 第 1 天", Pal.Btn, Pal.Gold, PixelButton.CState.New, () => CloseTutorial(true));
             Anchor(tutGo.GetComponent<RectTransform>(), 0.62f, 0.02f, 0.94f, 0.10f);
             tutorialPanel.gameObject.SetActive(false);
-
-            // 扫描线（最顶层，不拦截点击）
-            var scan = NewRect("Scanlines", root);
-            Stretch(scan, 0, 0, 0, 0);
-            var simg = scan.gameObject.AddComponent<Image>();
-            simg.sprite = MakeScanlineSprite();
-            simg.type = Image.Type.Tiled;
-            simg.color = new Color(1f, 1f, 1f, 0.10f);
-            simg.raycastTarget = false;
         }
 
         void MakePauseBtn(Transform parent, string label, Color bg, Color fg, float y0, float y1, System.Action act)
@@ -573,12 +600,37 @@ namespace JudgementCalendar
             sr.vertical = true;
             sr.movementType = ScrollRect.MovementType.Clamped;
             sr.scrollSensitivity = 24;
+
+            // 右侧细长滚动条：6px 宽深灰轨道 + 亮灰手柄（可拖动，滚动位置可视化）
+            var sbGo = NewRect("Scrollbar", go);
+            sbGo.anchorMin = new Vector2(1, 0);
+            sbGo.anchorMax = new Vector2(1, 1);
+            sbGo.pivot = new Vector2(1, 0.5f);
+            sbGo.sizeDelta = new Vector2(6, 0);
+            sbGo.anchoredPosition = new Vector2(-2, 0);
+            var sbBg = sbGo.gameObject.AddComponent<Image>();
+            sbBg.color = Pal.LineOff;
+            var sb = sbGo.gameObject.AddComponent<Scrollbar>();
+            sb.direction = Scrollbar.Direction.BottomToTop;
+            sb.targetGraphic = sbBg;
+            var handle = NewRect("Handle", sbGo);
+            handle.anchorMin = new Vector2(0, 0);
+            handle.anchorMax = new Vector2(1, 1);
+            handle.offsetMin = new Vector2(2, 0);
+            handle.offsetMax = new Vector2(-2, 0);
+            var handleImg = handle.gameObject.AddComponent<Image>();
+            handleImg.color = Pal.TextDim;
+            sb.handleRect = handle;
+            sb.numberOfSteps = 0;
+
+            sr.verticalScrollbar = sb;
+            sr.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
             return sr;
         }
 
         // 六态按钮：bg 底 + 2px 阶梯描边 + 文字 +（可选）像素锁图标
         Button MakeButton(Transform parent, string label, Color bgCol, Color fgCol,
-            PixelButton.CState state, System.Action onClick)
+            PixelButton.CState state, System.Action onClick, int fontSize = FS_M)
         {
             var go = NewRect("Btn", parent);
             var img = go.gameObject.AddComponent<Image>();
@@ -587,8 +639,8 @@ namespace JudgementCalendar
             b.targetGraphic = img;
             b.transition = Selectable.Transition.None; // 状态渲染完全由 PixelButton 接管
 
-            var t = AddText(go, label, FS_M, fgCol, TextAnchor.MiddleCenter);
-            Stretch(t.rectTransform, 16, 8, 16, 8);
+            var t = AddText(go, label, fontSize, fgCol, TextAnchor.MiddleCenter);
+            Stretch(t.rectTransform, 8, 4, 8, 4);
 
             var lockGo = NewRect("Lock", go);
             Anchor(lockGo.GetComponent<RectTransform>(), 0.5f, 0.5f, 0.5f, 0.5f);
@@ -655,14 +707,13 @@ namespace JudgementCalendar
             headerText.text = $"审判日历 · 第 {S.day} / {GameEngine.GameState.TotalDays} 天";
 
             // 三维数值：大数字 + 横条仪表
-            SetStat(statNums[0], statFills[0], S.stability, Pal.Gold);
-            SetStat(statNums[1], statFills[1], S.trust, Pal.Gold);
-            SetStat(statNums[2], statFills[2], S.drift, TierColor());
-            auxStats.text =
-                $"实锤  {S.evidence}\n" +
-                $"行动点  {S.actions}\n" +
-                $"伪造次数  {S.forgedCount}\n\n" +
-                $"双密钥制度：生效";
+            SetStat(statNums[0], statFills[0], S.stability, Pal.Green, 100);
+            SetStat(statNums[1], statFills[1], S.trust, Pal.Amber, 100);
+            SetStat(statNums[2], statFills[2], S.drift, TierColor(), 100);
+            SetStat(statNums[3], statFills[3], S.actions, Pal.Gold, 3);
+            SetStat(statNums[4], statFills[4], S.evidence, Pal.Gold, 3);
+            auxStats.text = $"伪造 ×{S.forgedCount} · 双密钥制度：生效";
+            auxStats.text = $"伪造 ×{S.forgedCount} · 双密钥制度：生效";
 
             // 档案库（打码）
             var sb = new System.Text.StringBuilder();
@@ -673,17 +724,19 @@ namespace JudgementCalendar
             // 对话流
             convText.text = string.Join("\n", engine.Conversation.ToArray());
 
-            // 问题按钮：Briefing=锁定 / Interrogate+有点数=默认 / 没点数=禁用
+            // 问题按钮：渲染全部 8 个；已问过的低亮暗淡保留原位
             ClearChildren(qContainer);
             bool canAsk = engine.CanAsk();
             bool interrogating = S.phase == Phase.Interrogate;
-            foreach (var qid in engine.AvailableQuestionIds())
+            foreach (var qid in QuestionPool.Ids)
             {
                 string label = QuestionPool.TextOf(qid);
+                bool asked = S.askedThisDay.Contains(qid);
                 var st = !interrogating ? PixelButton.CState.Locked
+                       : asked ? PixelButton.CState.Disabled
                        : canAsk ? PixelButton.CState.Default
                        : PixelButton.CState.Disabled;
-                var b = MakeButton(qContainer, label, Pal.Btn, Pal.Text, st, () => engine.Ask(qid));
+                var b = MakeButton(qContainer, label, Pal.Btn, Pal.Text, st, () => engine.Ask(qid), FS_M);
                 if (st == PixelButton.CState.Default) { var pb = b.GetComponent<PixelButton>(); pb.SetColors(Pal.Btn, Pal.Text); }
             }
 
@@ -700,9 +753,7 @@ namespace JudgementCalendar
                     Color fg = o.forged ? Pal.Red : Pal.Text;
                     var b = MakeButton(optContainer, label, bg, fg,
                         needEv ? PixelButton.CState.Locked : PixelButton.CState.Default,
-                        () => engine.TryDecide(o));
-                    var le = b.gameObject.AddComponent<LayoutElement>();
-                    le.preferredHeight = 40;
+                        () => engine.TryDecide(o), FS_L); // 36px 大字居中，超宽自动折行
                 }
             }
 
@@ -722,15 +773,19 @@ namespace JudgementCalendar
             optWrap.gameObject.SetActive(!S.gameEnded && S.phase == Phase.Decide);
             flowWrap.gameObject.SetActive(!S.gameEnded && (S.phase == Phase.Briefing || S.phase == Phase.Interrogate || S.phase == Phase.Resolve));
 
-            // 提示悬浮窗：有内容才弹出（结局出现时隐藏）
-            hintBody.text = engine.LastHint;
-            bool showHint = !S.gameEnded && !string.IsNullOrEmpty(engine.LastHint);
-            hintPopup.gameObject.SetActive(showHint);
+            // 提示悬浮窗：仅在新提示出现时弹出，2 秒后由 Update 自动隐藏
+            if (string.IsNullOrEmpty(engine.LastHint)) activeHint = null; // 引擎清空提示后允许再次弹出
+            bool showHint = !S.gameEnded && !string.IsNullOrEmpty(engine.LastHint) && engine.LastHint != activeHint;
             if (showHint)
             {
+                activeHint = engine.LastHint;
+                hintShownAt = Time.time;
+                hintPopup.gameObject.SetActive(true);
+                hintBody.text = engine.LastHint;
                 LayoutRebuilder.ForceRebuildLayoutImmediate(hintScroll.content);
                 hintScroll.verticalNormalizedPosition = 1f; // 从头显示
             }
+            if (S.gameEnded) hintPopup.gameObject.SetActive(false);
 
             endingPanel.gameObject.SetActive(S.gameEnded);
             endingText.text = S.endingText;
@@ -781,12 +836,12 @@ namespace JudgementCalendar
         }
 
         // 大数字（值按档位着色）+ 小号 "/100"，横条按百分比填充
-        void SetStat(Text num, RectTransform fill, int val, Color col)
+        void SetStat(Text num, RectTransform fill, int val, Color col, int max)
         {
             string hex = ColorUtility.ToHtmlStringRGB(col);
             num.text = $"<size=36><color=#{hex}>{val}</color></size>" +
-                       $"<size=24><color=#6C7688> /100</color></size>";
-            fill.anchorMax = new Vector2(Mathf.Clamp(val / 100f, 0.04f, 1f), 1f);
+                       $"<size=24><color=#6C7688> /{max}</color></size>";
+            fill.anchorMax = new Vector2(Mathf.Clamp(val / (float)max, 0.04f, 1f), 1f);
         }
 
         // ───────────────────── 像素素材生成（全部 Point 采样，整数倍使用） ─────────────────────
